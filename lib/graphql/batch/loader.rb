@@ -1,22 +1,20 @@
 module GraphQL::Batch
   class Loader
-    class NoExecutorError < StandardError; end
-
-    def self.for(*group_args)
-      loader_key = loader_key_for(*group_args)
-      executor = Executor.current
-
-      unless executor
-        raise NoExecutorError, "Cannot create loader without an Executor."\
-          " Wrap the call to `for` with `GraphQL::Batch.batch` or use"\
-          " `GraphQL::Batch::Setup` as a query instrumenter if using with `graphql-ruby`"
+    # Use new argument forwarding syntax if available as an optimization
+    if RUBY_ENGINE && Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("2.7")
+      class_eval(<<~RUBY, __FILE__, __LINE__ + 1)
+        def self.for(...)
+          current_executor.loader(loader_key_for(...)) { new(...) }
+        end
+      RUBY
+    else
+      def self.for(*group_args)
+        current_executor.loader(loader_key_for(*group_args)) { new(*group_args) }
       end
-
-      executor.loader(loader_key) { new(*group_args) }
     end
 
-    def self.loader_key_for(*group_args)
-      [self].concat(group_args)
+    def self.loader_key_for(*group_args, **group_kwargs)
+      [self, group_kwargs, group_args]
     end
 
     def self.load(key)
@@ -25,6 +23,23 @@ module GraphQL::Batch
 
     def self.load_many(keys)
       self.for.load_many(keys)
+    end
+
+    class << self
+      private
+
+      def current_executor
+        executor = Executor.current
+
+        unless executor
+          raise GraphQL::Batch::NoExecutorError, 'Cannot create loader without'\
+            ' an Executor. Wrap the call to `for` with `GraphQL::Batch.batch`'\
+            ' or use `GraphQL::Batch::Setup` as a query instrumenter if'\
+            ' using with `graphql-ruby`'
+        end
+
+        executor
+      end
     end
 
     attr_accessor :loader_key, :executor
@@ -117,13 +132,16 @@ module GraphQL::Batch
 
     def reject_pending_promises(load_keys, err)
       load_keys.each do |key|
-        # promise.rb ignores reject if promise isn't pending
+        next unless promise_for(key).pending?
+
         reject(key, err)
       end
     end
 
     def check_for_broken_promises(load_keys)
       load_keys.each do |key|
+        next unless promise_for(key).pending?
+
         reject(key, ::Promise::BrokenError.new("#{self.class} didn't fulfill promise for key #{key.inspect}"))
       end
     end

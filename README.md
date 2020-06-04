@@ -25,6 +25,8 @@ Or install it yourself as:
 
 ### Basic Usage
 
+#### Schema Configuration
+
 Require the library
 
 ```ruby
@@ -46,11 +48,14 @@ class RecordLoader < GraphQL::Batch::Loader
 end
 ```
 
-Use `GraphQL::Batch` as a plugin in your schema (for graphql >= `1.5.0`).
+Use `GraphQL::Batch` as a plugin in your schema _after_ specifying the mutation
+so that `GraphQL::Batch` can extend the mutation fields to clear the cache after
+they are resolved (for graphql >= `1.5.0`).
 
 ```ruby
-MySchema = GraphQL::Schema.define do
+class MySchema < GraphQL::Schema
   query MyQueryType
+  mutation MyMutationType
 
   use GraphQL::Batch
 end
@@ -66,10 +71,30 @@ MySchema = GraphQL::Schema.define do
 end
 ```
 
-The loader class can be used from the resolve proc for a graphql field by calling `.for` with the grouping arguments to get a loader instance, then call `.load` on that instance with the key to load.
+#### Field Usage
+
+The loader class can be used from the resolver for a graphql field by calling `.for` with the grouping arguments to get a loader instance, then call `.load` on that instance with the key to load.
 
 ```ruby
-resolve -> (obj, args, context) { RecordLoader.for(Product).load(args["id"]) }
+field :product, Types::Product, null: true do
+  argument :id, ID, required: true
+end
+
+def product(id:)
+  RecordLoader.for(Product).load(id)
+end
+```
+
+The loader also supports batch loading an array of records instead of just a single record, via `load_many`. For example:
+
+```ruby
+field :products, [Types::Product, null: true], null: false do
+  argument :ids, [ID], required: true
+end
+
+def products(ids:)
+  RecordLoader.for(Product).load_many(ids)
+end
 ```
 
 Although this library doesn't have a dependency on active record,
@@ -83,8 +108,8 @@ on records with the same id.
 GraphQL::Batch::Loader#load returns a Promise using the [promise.rb gem](https://rubygems.org/gems/promise.rb) to provide a promise based API, so you can transform the query results using `.then`
 
 ```ruby
-resolve -> (obj, args, context) do
-  RecordLoader.for(Product).load(args["id"]).then do |product|
+def product_title(id:)
+  RecordLoader.for(Product).load(id).then do |product|
     product.title
   end
 end
@@ -93,8 +118,8 @@ end
 You may also need to do another query that depends on the first one to get the result, in which case the query block can return another query.
 
 ```ruby
-resolve -> (obj, args, context) do
-  RecordLoader.for(Product).load(args["id"]).then do |product|
+def product_image(id:)
+  RecordLoader.for(Product).load(id).then do |product|
     RecordLoader.for(Image).load(product.image_id)
   end
 end
@@ -103,7 +128,7 @@ end
 If the second query doesn't depend on the first one, then you can use Promise.all, which allows each query in the group to be batched with other queries.
 
 ```ruby
-resolve -> (obj, args, context) do
+def all_collections
   Promise.all([
     CountLoader.for(Shop, :smart_collections).load(context.shop_id),
     CountLoader.for(Shop, :custom_collections).load(context.shop_id),
@@ -116,11 +141,13 @@ end
 `.then` can optionally take two lambda arguments, the first of which is equivalent to passing a block to `.then`, and the second one handles exceptions.  This can be used to provide a fallback
 
 ```ruby
-resolve -> (obj, args, context) do
-  CacheLoader.for(Product).load(args["id"]).then(nil, lambda do |exc|
+def product(id:)
+  # Try the cache first ...
+  CacheLoader.for(Product).load(id).then(nil, lambda do |exc|
+    # But if there's a connection error, go to the underlying database
     raise exc unless exc.is_a?(Redis::BaseConnectionError)
     logger.warn err.message
-    RecordLoader.for(Product).load(args["id"])
+    RecordLoader.for(Product).load(id)
   end)
 end
 ```
